@@ -1,0 +1,11 @@
+selenium
+openpyxl
+psycopg[binary]==3.3.4
+psycopg2-binary
+python-dotenv
+tqdm
+rich
+keyboard
+pyfiglet
+readchar
+
