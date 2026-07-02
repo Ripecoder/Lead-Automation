@@ -8,4 +8,9 @@ rich
 keyboard
 pyfiglet
 readchar
-
+google-auth-oauthlib
+beautifulsoup4
+lxml
+loguru
+gspread
+python-dotenv

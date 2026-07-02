@@ -1,6 +1,6 @@
-# Line 1-12: imports
 import os
 import time
+import re
 from dotenv import load_dotenv
 import psycopg2
 
@@ -9,202 +9,177 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from tqdm import tqdm
 
-# Line 15: load .env
+
+# ---------------------------
+# ENV SAFE LOAD
+# ---------------------------
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise Exception("DATABASE_URL missing in environment")
 
-# Line 20: connect to postgres
+# ---------------------------
+# DB
+# ---------------------------
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
-# Line 25: start browser
+# ---------------------------
+# SETUP
+# ---------------------------
 driver = webdriver.Chrome()
+wait = WebDriverWait(driver, 20)
 
-# Line 28: open Google Maps
 driver.get("https://www.google.com/maps")
 
-# Line 31: get search query
 search_query = input("Enter search query: ")
 
-# Line 34-36: wait for search box
-search_box = WebDriverWait(driver, 30).until(
-    EC.presence_of_element_located((By.NAME, "q"))
-)
+table_name = input("Table name: ").strip().lower()
+table_name = re.sub(r"[^a-z0-9_]", "", table_name)
 
-# Line 40-41: search
+# ---------------------------
+# TABLE
+# ---------------------------
+cur.execute(f"""
+CREATE TABLE IF NOT EXISTS {table_name} (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    phone TEXT UNIQUE,
+    website TEXT,
+    address TEXT,
+    rating NUMERIC,
+    reviews INTEGER
+);
+""")
+conn.commit()
+
+# ---------------------------
+# SEARCH
+# ---------------------------
+search_box = wait.until(EC.presence_of_element_located((By.NAME, "q")))
 search_box.send_keys(search_query)
 search_box.send_keys(Keys.ENTER)
 
 time.sleep(5)
 
-print("\nURL:", driver.current_url)
-print("TITLE:", driver.title)
-input("Inspect browser and press Enter...")
-
-# Line 47-50
-results_feed = WebDriverWait(driver, 30).until(
+# ---------------------------
+# RESULTS PANEL
+# ---------------------------
+feed = wait.until(
     EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="feed"]'))
 )
 
-print("\n[OK] Results feed loaded\n")
-
 # ---------------------------
-# PHASE 1: SCROLL + LOAD
+# SMART SCROLL (until stable)
 # ---------------------------
+last_count = 0
 
-previous_count = 0
-cards_total = 0
-
-for i in tqdm(range(30), desc="Scrolling results"):
-    
-    driver.execute_script(
-        "arguments[0].scrollTop = arguments[0].scrollHeight",
-        results_feed
-    )
-
+for _ in range(50):
+    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", feed)
     time.sleep(2)
 
-    cards = driver.find_elements(By.CSS_SELECTOR, 'div[role="article"]')
-    current_count = len(cards)
-
-    cards_total = current_count
-
-    if current_count == previous_count:
+    cards = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")
+    if len(cards) == last_count:
         break
+    last_count = len(cards)
 
-    previous_count = current_count
-
-print(f"\n[OK] Total cards loaded: {cards_total}\n")
+print(f"Found cards: {last_count}")
 
 # ---------------------------
-# PHASE 2: COLLECT URLS
+# GET RESULTS (IMPORTANT FIX)
 # ---------------------------
+cards = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")
 
-links = driver.find_elements(By.CSS_SELECTOR, "a.hfpxzc")
-
-business_urls = []
-
-for link in links:
+urls = []
+for c in cards:
     try:
-        href = link.get_attribute("href")
-        if href and href not in business_urls:
-            business_urls.append(href)
+        a = c.find_element(By.CSS_SELECTOR, "a")
+        href = a.get_attribute("href")
+        if href and href not in urls:
+            urls.append(href)
     except:
-        pass
+        continue
 
-print(f"[OK] Collected {len(business_urls)} URLs\n")
+print("URLs:", len(urls))
 
 # ---------------------------
-# PHASE 3: SCRAPE + INSERT
+# SCRAPE
 # ---------------------------
+seen = set()
 
-seen_names = set()
-
-progress = tqdm(total=len(business_urls), desc="Scraping leads")
-
-for i, url in enumerate(business_urls):
-
+for url in urls:
     try:
         driver.get(url)
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "h1")))
 
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "h1"))
-        )
-
-        # ---------------- Name ----------------
-        try:
-            name = driver.find_element(By.TAG_NAME, "h1").text
-        except:
-            name = ""
-
-        if name in seen_names:
-            progress.update(1)
+        name = driver.find_element(By.TAG_NAME, "h1").text.strip()
+        if not name or name in seen:
             continue
+        seen.add(name)
 
-        seen_names.add(name)
-
-        # ---------------- Phone ----------------
+        # phone
         try:
             phone = driver.find_element(
                 By.XPATH,
                 '//button[contains(@data-item-id,"phone")]'
             ).text
         except:
-            phone = ""
+            phone = None
 
-        # ---------------- Website ----------------
+        # website
         try:
             website = driver.find_element(
                 By.XPATH,
                 '//a[contains(@data-item-id,"authority")]'
             ).get_attribute("href")
         except:
-            website = ""
+            website = None
 
-        # ---------------- Address ----------------
+        # address
         try:
             address = driver.find_element(
                 By.XPATH,
                 '//button[contains(@data-item-id,"address")]'
             ).text
         except:
-            address = ""
+            address = None
 
-        # ---------------- Rating ----------------
+        # rating
         try:
-            rating = driver.find_element(
+            rating = float(driver.find_element(
                 By.CSS_SELECTOR,
                 'div.F7nice span[aria-hidden="true"]'
-            ).text
+            ).text)
         except:
-            rating = ""
+            rating = None
 
-        # ---------------- Reviews ----------------
+        # reviews
         try:
-            reviews = driver.find_elements(
-                By.CSS_SELECTOR,
-                'div.F7nice span'
-            )[1].text
+            reviews_text = driver.find_elements(By.CSS_SELECTOR, 'div.F7nice span')[1].text
+            reviews = int(re.sub(r"\D", "", reviews_text))
         except:
-            reviews = ""
+            reviews = None
 
-        # ---------------- DB INSERT ----------------
-        cur.execute(
-            """
-            INSERT INTO business_leads (
-                name,
-                phone,
-                website,
-                address,
-                rating,
-                reviews
-            )
+        # insert
+        cur.execute(f"""
+            INSERT INTO {table_name}
+            (name, phone, website, address, rating, reviews)
             VALUES (%s,%s,%s,%s,%s,%s)
             ON CONFLICT (phone) DO NOTHING
-            """,
-            (name, phone, website, address, rating, reviews)
-        )
+        """, (name, phone, website, address, rating, reviews))
 
         conn.commit()
 
-        progress.set_postfix_str(name[:30])
+        print("Saved:", name)
 
-    except Exception:
-        pass
+    except Exception as e:
+        continue
 
-    progress.update(1)
-
-progress.close()
-
-# ---------------------------
-# CLEANUP
-# ---------------------------
 
 cur.close()
 conn.close()
 driver.quit()
 
-input("\nDone. Press Enter to exit...")
+print("DONE")
